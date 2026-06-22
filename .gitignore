@@ -1,0 +1,30 @@
+# Environments and local configs
+.env
+.env*.local
+*.env
+
+# Python
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Dependencies
+node_modules/
+
+# Local databases & logs
+*.db
+*.sqlite
+*.log
+
+# App data / assets
+uploads/
+HealthBridgedoc/
+
+# OS/Editor configs
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
