@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
 # Copy backend application source
-COPY database.py app.py ragbackend.py server.py ./
+COPY database.py ragbackend.py server.py ./
 
 # Expose port and run server
 ENV PORT 8000
