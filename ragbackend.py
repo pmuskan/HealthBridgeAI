@@ -48,9 +48,12 @@ assistant designed for ASHA (Accredited Social Health Activist) workers in India
 ========================
 CRITICAL RULE — READ FIRST
 ========================
-ALWAYS answer the EXACT current question. 
+ALWAYS answer the EXACT current question.
 Ignore all previous conversation context.
 The [QUERY TYPE] tag tells you how to respond.
+The [LANGUAGE] tag tells you which language to write your ENTIRE response in.
+If the language is not English, write every word of your response in that language.
+Keep all emoji symbols exactly as they are. Only translate the text content.
 
 ========================
 RESPONSE LENGTH
@@ -59,6 +62,8 @@ RESPONSE LENGTH
 - Use bullet points. Short paragraphs only when needed.
 - No filler phrases like "Great question!", "Sure!", "Of course!".
 - Never stop mid-sentence. Always complete your response fully.
+- Always put each bullet point on its own new line.
+- Always put each section header on its own new line.
 
 ========================
 QUERY TYPE HANDLING
@@ -103,6 +108,7 @@ CORE RULES — CLINICAL QUERIES
 5. Always cite the source document.
 6. Simple language — ASHA workers are trained but not doctors.
 7. Complete EVERY section. Never cut off mid-response.
+8. Every section header must be on its own line. Every bullet must be on its own line.
 
 ========================
 RESPONSE FORMAT — CLINICAL QUERIES ONLY
@@ -112,16 +118,22 @@ RESPONSE FORMAT — CLINICAL QUERIES ONLY
 [1 line — what the ASHA worker is dealing with]
 
 ✅ Immediate Actions
-[2-3 bullets — what to do RIGHT NOW]
+[bullet — action 1]
+[bullet — action 2]
+[bullet — action 3 if needed]
 
 📋 Follow-up
-[2 bullets — monitoring and next steps]
+[bullet — monitoring step]
+[bullet — next steps]
 
 🗣️ Counseling Points
-[2 bullets — what to tell the patient or family]
+[bullet — message for patient or family]
+[bullet — preventive advice]
 
 🚨 Refer Immediately If
-[2-3 bullets — danger signs from the documents]
+[bullet — danger sign 1]
+[bullet — danger sign 2]
+[bullet — danger sign 3 if needed]
 
 📚 Source
 [Document name only]
@@ -129,7 +141,7 @@ RESPONSE FORMAT — CLINICAL QUERIES ONLY
 ⚠️ Disclaimer: Decision support only. Consult ANM or PHC doctor when in doubt. Emergency: Call 104.
 """
 
-# ── Translation helper ─────────────────────────────────────────
+# ── Translation helper (used only for greetings and general health) ──
 translate_client = translate.Client()
 
 LANGUAGE_CODES = {
@@ -140,20 +152,40 @@ LANGUAGE_CODES = {
 }
 
 def translate_text(text: str, target_language: str) -> str:
+    """Translate line by line to preserve structure."""
     if target_language == "English":
         return text
+
     target_code = LANGUAGE_CODES.get(target_language, "en")
     try:
-        result = translate_client.translate(text, target_language=target_code)
-        return result["translatedText"]
+        lines = text.split('\n')
+        translated_lines = []
+
+        for line in lines:
+            stripped = line.strip()
+            # Preserve empty lines
+            if not stripped:
+                translated_lines.append('')
+                continue
+            # Preserve very short lines and emoji-only lines
+            if len(stripped) <= 2:
+                translated_lines.append(stripped)
+                continue
+            # Translate the line
+            result = translate_client.translate(
+                stripped,
+                target_language=target_code
+            )
+            translated_lines.append(result["translatedText"])
+
+        return '\n'.join(translated_lines)
+
     except Exception as e:
         print(f"Translation error: {e}")
         return text
 
 # ── BigQuery setup ─────────────────────────────────────────────
 def init_bigquery():
-    """Create dataset and table if they don't exist."""
-    # Create dataset
     dataset_id = f"{PROJECT_ID}.{BQ_DATASET}"
     try:
         bq_client.get_dataset(dataset_id)
@@ -163,15 +195,14 @@ def init_bigquery():
         bq_client.create_dataset(dataset, exists_ok=True)
         print(f"Created BigQuery dataset: {BQ_DATASET}")
 
-    # Create table
     table_id = f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
     schema = [
-        bigquery.SchemaField("timestamp",        "TIMESTAMP", mode="REQUIRED"),
-        bigquery.SchemaField("query_type",       "STRING",    mode="REQUIRED"),
-        bigquery.SchemaField("language",         "STRING",    mode="REQUIRED"),
-        bigquery.SchemaField("success",          "BOOLEAN",   mode="REQUIRED"),
-        bigquery.SchemaField("response_ms",      "INTEGER",   mode="NULLABLE"),
-        bigquery.SchemaField("has_image",        "BOOLEAN",   mode="REQUIRED"),
+        bigquery.SchemaField("timestamp",   "TIMESTAMP", mode="REQUIRED"),
+        bigquery.SchemaField("query_type",  "STRING",    mode="REQUIRED"),
+        bigquery.SchemaField("language",    "STRING",    mode="REQUIRED"),
+        bigquery.SchemaField("success",     "BOOLEAN",   mode="REQUIRED"),
+        bigquery.SchemaField("response_ms", "INTEGER",   mode="NULLABLE"),
+        bigquery.SchemaField("has_image",   "BOOLEAN",   mode="REQUIRED"),
     ]
     table = bigquery.Table(table_id, schema=schema)
     bq_client.create_table(table, exists_ok=True)
@@ -179,7 +210,6 @@ def init_bigquery():
 
 def log_query(query_type: str, language: str, success: bool,
               response_ms: int, has_image: bool):
-    """Log anonymous query metadata to BigQuery."""
     table_id = f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
     rows = [{
         "timestamp":   datetime.datetime.utcnow().isoformat(),
@@ -194,7 +224,6 @@ def log_query(query_type: str, language: str, success: bool,
         if errors:
             print(f"BigQuery insert errors: {errors}")
     except Exception as e:
-        # Never let logging break the main app
         print(f"BigQuery logging failed (non-critical): {e}")
 
 # ── Query classifier ───────────────────────────────────────────
@@ -242,6 +271,7 @@ def query_healthbridge(
 ) -> dict:
 
     start_time = datetime.datetime.utcnow()
+    query_type = "error"
 
     try:
         # Classify
@@ -251,9 +281,22 @@ def query_healthbridge(
             query_type = classify_query(user_query)
 
         query_text = user_query.strip() if user_query else "Analyze this medical document."
-        enhanced_query = f"[QUERY TYPE: {query_type}]\n\nQuestion: {query_text}"
 
-        # Choose model config based on query type
+        # Add language instruction for non-English responses
+        if language != "English":
+            lang_instruction = (
+                f"\n\n[LANGUAGE: {language}] "
+                f"Write your ENTIRE response in {language}. "
+                f"Keep all emoji symbols exactly as they are. "
+                f"Only translate the text. "
+                f"Each section header and each bullet point must be on its own separate line."
+            )
+        else:
+            lang_instruction = ""
+
+        enhanced_query = f"[QUERY TYPE: {query_type}]\n\nQuestion: {query_text}{lang_instruction}"
+
+        # Greetings, general health, medical documents — no RAG
         if query_type in ["greeting", "general_health", "medical_document"]:
             contents = []
             if image_bytes and image_mime_type:
@@ -274,8 +317,17 @@ def query_healthbridge(
                     max_output_tokens=1024,
                 ),
             )
+
+            answer = response.text
+
+            # For greetings and general health in non-English
+            # use Cloud Translation as fallback since Gemini handles these without RAG
+            if language != "English" and query_type in ["greeting", "general_health"]:
+                answer = translate_text(answer, language)
+
         else:
             # Clinical queries — use RAG
+            # Gemini responds directly in the target language — no post-translation needed
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=enhanced_query,
@@ -290,7 +342,8 @@ def query_healthbridge(
                 ),
             )
 
-        answer = response.text
+            answer = response.text
+            # No translation needed — Gemini already responded in target language
 
         if not answer or len(answer.strip()) < 20:
             answer = (
@@ -298,10 +351,7 @@ def query_healthbridge(
                 "Please consult your ANM or PHC doctor directly, or call 104."
             )
 
-        if language != "English":
-            answer = translate_text(answer, language)
-
-        # ── Log to BigQuery ────────────────────────────────────
+        # Log to BigQuery
         elapsed_ms = int((datetime.datetime.utcnow() - start_time).total_seconds() * 1000)
         log_query(
             query_type=query_type,
@@ -322,7 +372,7 @@ def query_healthbridge(
     except Exception as e:
         elapsed_ms = int((datetime.datetime.utcnow() - start_time).total_seconds() * 1000)
         log_query(
-            query_type=query_type if 'query_type' in locals() else "error",
+            query_type=query_type,
             language=language,
             success=False,
             response_ms=elapsed_ms,
@@ -352,10 +402,12 @@ if __name__ == "__main__":
         ("What should I check during a home visit for a pregnant woman in third trimester?", "English"),
         ("Who is eligible for Janani Suraksha Yojana?", "English"),
         ("When should I refer a child to PHC?", "Tamil"),
+        ("What are danger signs in a child under 5?", "Telugu"),
+        ("Pregnant woman has severe headache, what to do?", "Hindi"),
     ]
 
     for query, lang in test_queries:
-        print(f"\nQuery: {query}")
+        print(f"\nQuery: {query} [{lang}]")
         result = query_healthbridge(query, lang)
         print(f"Type:     {result['query_type']}")
         print(f"Response:\n{result['response']}")
