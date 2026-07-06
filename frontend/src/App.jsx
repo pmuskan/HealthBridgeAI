@@ -3,8 +3,9 @@ import {
   LogOut, Plus, MessageSquare, Trash2, Globe, Menu, X,
   Send, Copy, Check, Baby, AlertTriangle, HeartPulse,
   ClipboardList, Stethoscope, User, HelpCircle, Activity,
-  Paperclip
+  Paperclip, BarChart2
 } from 'lucide-react';
+import Analytics from './Analytics';
 
 const API_BASE = window.location.port === "5173" ? "http://localhost:8000/api" : "/api";
 
@@ -28,6 +29,7 @@ export default function App() {
   const [language, setLanguage] = useState('English');
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [activeView, setActiveView] = useState('chat'); // 'chat' or 'analytics'
 
   // ── Layout & Status States ─────────────────────────────────────
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -53,6 +55,7 @@ export default function App() {
       setChats([]);
       setActiveChatId(null);
       setMessages([]);
+      setActiveView('chat');
     }
   }, [token]);
 
@@ -245,6 +248,7 @@ export default function App() {
         setChats([data.chat, ...chats]);
         setActiveChatId(data.chat.id);
         setMessages([]);
+        setActiveView('chat');
         setIsSidebarOpen(false);
       }
     } catch (err) {
@@ -578,6 +582,7 @@ export default function App() {
                   onClick={() => {
                     setActiveChatId(c.id);
                     setLanguage(c.language);
+                    setActiveView('chat');
                     setIsSidebarOpen(false);
                   }}
                 >
@@ -595,6 +600,21 @@ export default function App() {
                 </div>
               ))
             )}
+          </div>
+        </div>
+
+        <div className="sidebar-analytics-link" style={{ padding: '0 12px 16px 12px', borderBottom: '1.5px solid var(--primary-border)' }}>
+          <div
+            className={`history-item ${activeView === 'analytics' ? 'active' : ''}`}
+            onClick={() => {
+              setActiveView('analytics');
+              setIsSidebarOpen(false);
+            }}
+          >
+            <div className="history-meta">
+              <BarChart2 className="w-4 h-4 flex-shrink-0" style={{ opacity: 0.7 }} />
+              <span className="history-text">Analytics Dashboard</span>
+            </div>
           </div>
         </div>
 
@@ -618,8 +638,11 @@ export default function App() {
 
       {/* Main Chat Workspace */}
       <main className="main-content">
-
-        {/* App Bar */}
+        {activeView === 'analytics' ? (
+          <Analytics token={token} onClose={() => setActiveView('chat')} />
+        ) : (
+          <>
+            {/* App Bar */}
         <header className="header-bar">
           <div className="header-left">
             <button
@@ -841,7 +864,8 @@ export default function App() {
             </div>
           </div>
         </footer>
-
+          </>
+        )}
       </main>
     </div>
   );

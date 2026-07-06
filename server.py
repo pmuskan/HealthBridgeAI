@@ -6,12 +6,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, EmailStr
-from typing import List, Optional
+from typing import Optional
 
 import database as db
-from ragbackend import query_healthbridge, PROJECT_ID, CORPUS_NAME
+from ragbackend import query_healthbridge, PROJECT_ID, CORPUS_NAME, get_user_analytics
 
-# Initialize database tables
 db.init_db()
 
 app = FastAPI(
@@ -20,20 +19,17 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# ── CORS Middleware ────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Dev environment CORS; narrow in production if needed
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── Static Uploads Mounting ────────────────────────────────────
 os.makedirs("uploads", exist_ok=True)
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
-# ── Dependencies ───────────────────────────────────────────────
 async def get_current_user(authorization: Optional[str] = Header(None)):
     if not authorization:
         raise HTTPException(
@@ -59,7 +55,6 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
     user["token"] = token
     return user
 
-# ── Pydantic Schemas ───────────────────────────────────────────
 class UserSignup(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     email: EmailStr
@@ -78,7 +73,6 @@ class MessageSend(BaseModel):
     query: str
     language: Optional[str] = "English"
 
-# ── Auth Endpoints ─────────────────────────────────────────────
 @app.post("/api/auth/signup")
 async def signup(user_data: UserSignup):
     try:
@@ -88,7 +82,6 @@ async def signup(user_data: UserSignup):
             password=user_data.password,
             role=user_data.role
         )
-        # Auto-login after signup
         token = db.create_session(user["id"])
         return {"success": True, "token": token, "user": user}
     except ValueError as e:
@@ -118,7 +111,6 @@ async def get_me(current_user = Depends(get_current_user)):
     profile = {k: v for k, v in current_user.items() if k != "token"}
     return {"success": True, "user": profile}
 
-# ── Chat Endpoints ─────────────────────────────────────────────
 @app.get("/api/chats")
 async def get_chats(current_user = Depends(get_current_user)):
     chats = db.get_user_chats(current_user["id"])
@@ -135,7 +127,6 @@ async def create_new_chat(chat_data: ChatCreate, current_user = Depends(get_curr
 
 @app.get("/api/chats/{chat_id}")
 async def get_messages(chat_id: str, current_user = Depends(get_current_user)):
-    # Verify ownership of chat thread
     chats = db.get_user_chats(current_user["id"])
     user_chat_ids = [c["id"] for c in chats]
     if chat_id not in user_chat_ids:
@@ -152,7 +143,6 @@ async def send_message(
     image: Optional[UploadFile] = File(None),
     current_user = Depends(get_current_user)
 ):
-    # Verify ownership of chat thread
     chats = db.get_user_chats(current_user["id"])
     user_chat_ids = [c["id"] for c in chats]
     if chat_id not in user_chat_ids:
@@ -164,7 +154,6 @@ async def send_message(
         
     lang = language or "English"
     
-    # 1. Handle image upload if present
     image_path = None
     image_bytes = None
     image_mime_type = None
@@ -173,30 +162,26 @@ async def send_message(
         unique_filename = f"{uuid.uuid4()}{ext}"
         image_path = f"uploads/{unique_filename}"
         
-        # Read bytes
         image_bytes = await image.read()
         image_mime_type = image.content_type
         
-        # Save locally
         with open(image_path, "wb") as f:
             f.write(image_bytes)
             
-    # 2. Fetch current chat history for context
     history_messages = db.get_chat_messages(chat_id)
     
-    # 3. Extract only user queries for RAG context, matching app.py logic
+    # Extract only user queries for RAG context, matching app.py logic
     user_history = [m["content"] for m in history_messages if m["role"] == "user"]
     
-    # 4. Query RAG backend
     result = query_healthbridge(
         user_query=query_text,
         language=lang,
         chat_history=user_history,
         image_bytes=image_bytes,
-        image_mime_type=image_mime_type
+        image_mime_type=image_mime_type,
+        user_id=str(current_user["id"])
     )
     
-    # 5. Save messages to db
     user_message_content = query_text if query_text else "Uploaded a medical document/prescription."
     db.add_message(
         chat_id=chat_id,
@@ -215,7 +200,7 @@ async def send_message(
         language=result["language"]
     )
     
-    # 6. Auto-update title if it's the first message
+    # Auto-update title if it's the first message
     if not history_messages:
         title_source = query_text if query_text else "Medical Document Analysis"
         new_title = title_source[:30] + ("..." if len(title_source) > 30 else "")
@@ -239,7 +224,17 @@ async def delete_chat_thread(chat_id: str, current_user = Depends(get_current_us
     db.delete_chat(current_user["id"], chat_id)
     return {"success": True, "detail": "Chat session deleted successfully"}
 
-# ── Health Endpoint ────────────────────────────────────────────
+@app.get("/api/analytics/me")
+async def get_my_analytics(current_user = Depends(get_current_user)):
+    try:
+        stats = get_user_analytics(user_id=str(current_user["id"]))
+        return {"success": True, "analytics": stats}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch user analytics: {str(e)}"
+        )
+
 @app.get("/api/health")
 async def health_check():
     return {
@@ -248,7 +243,6 @@ async def health_check():
         "corpus_name": CORPUS_NAME
     }
 
-# ── Serve Production React Static Build ────────────────────────
 if os.path.exists("frontend/dist"):
     app.mount("/assets", StaticFiles(directory="frontend/dist/assets"), name="assets")
     
@@ -261,5 +255,4 @@ if os.path.exists("frontend/dist"):
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    print(f"Starting backend on http://localhost:{port}")
     uvicorn.run("server:app", host="0.0.0.0", port=port, reload=True)

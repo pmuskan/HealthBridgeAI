@@ -10,25 +10,32 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Configuration ──────────────────────────────────────────────
 PROJECT_ID = os.getenv("GCP_PROJECT_ID")
-REGION = "us-central1"
-BQ_DATASET = "healthbridge_analytics"
-BQ_TABLE = "query_logs"
+REGION = os.getenv("GCP_REGION", "us-central1")
+BQ_DATASET = os.getenv("BQ_DATASET", "healthbridge_analytics")
+BQ_TABLE = os.getenv("BQ_TABLE", "query_logs")
 
-vertexai.init(project=PROJECT_ID, location=REGION)
+try:
+    vertexai.init(project=PROJECT_ID, location=REGION)
+    corpora = list(rag.list_corpora())
+except Exception as e:
+    print(f"Non-critical: Failed to retrieve Vertex RAG corpus name in region {REGION}: {e}")
+    corpora = []
 
-# ── Get corpus name automatically ──────────────────────────────
-corpora = list(rag.list_corpora())
-CORPUS_NAME = corpora[0].name
+if not corpora and REGION != "us-central1":
+    print(f"No RAG corpora found in region {REGION}. Falling back to us-central1...")
+    REGION = "us-central1"
+    try:
+        vertexai.init(project=PROJECT_ID, location=REGION)
+        corpora = list(rag.list_corpora())
+    except Exception as e:
+        print(f"Non-critical: Failed to retrieve Vertex RAG corpus name in fallback region us-central1: {e}")
+        corpora = []
 
-# ── Gemini client ──────────────────────────────────────────────
+CORPUS_NAME = corpora[0].name if corpora else "healthbridge-corpus"
 client = genai.Client(vertexai=True, project=PROJECT_ID, location=REGION)
-
-# ── BigQuery client ────────────────────────────────────────────
 bq_client = bigquery.Client(project=PROJECT_ID)
 
-# ── RAG retrieval tool ─────────────────────────────────────────
 rag_retrieval_tool = types.Tool(
     retrieval=types.Retrieval(
         vertex_rag_store=types.VertexRagStore(
@@ -40,7 +47,6 @@ rag_retrieval_tool = types.Tool(
     )
 )
 
-# ── System prompt ──────────────────────────────────────────────
 SYSTEM_PROMPT = """
 You are HealthBridge AI, a friendly and evidence-based clinical decision support
 assistant designed for ASHA (Accredited Social Health Activist) workers in India.
@@ -89,7 +95,7 @@ QUERY TYPE HANDLING
 → Answer from retrieved NHM documents.
 → Use the structured format below.
 → NEVER hallucinate clinical facts.
-→ If not in documents: "I don't have enough information on this. Please consult your ANM or PHC doctor."
+→ If the retrieved RAG documents do not contain enough details or are missing the necessary information, use your pre-trained LLM knowledge (brain search) to answer the query fully and accurately. In the 📚 Source section, state which official NHM guideline or training document typically covers this protocol, and append "(assisted by general clinical knowledge)" to the source name.
 
 [QUERY TYPE: medical_document]
 → Answer based on the uploaded image (prescription, diagnostic report, lab result, clinical record, etc.) and the user query text.
@@ -103,9 +109,9 @@ CORE RULES — CLINICAL QUERIES
 ========================
 1. Never diagnose new diseases (summarizing or explaining the doctor's diagnosis written in the uploaded document is allowed).
 2. Never prescribe new medicines or dosages (explaining and listing the medications and dosages already prescribed by the doctor in the image is allowed, but do not suggest any new medications or alter the dosages).
-3. Never invent numbers or thresholds not in the documents.
+3. Never invent numbers or thresholds not in the documents (unless using general clinical knowledge fallback, in which case specify they are standard clinical guidelines).
 4. Always mention referral criteria.
-5. Always cite the source document.
+5. Always cite the source document (or expected source document if using general clinical knowledge).
 6. Simple language — ASHA workers are trained but not doctors.
 7. Complete EVERY section. Never cut off mid-response.
 8. Every section header must be on its own line. Every bullet must be on its own line.
@@ -141,7 +147,6 @@ RESPONSE FORMAT — CLINICAL QUERIES ONLY
 ⚠️ Disclaimer: Decision support only. Consult ANM or PHC doctor when in doubt. Emergency: Call 104.
 """
 
-# ── Translation helper (used only for greetings and general health) ──
 translate_client = translate.Client()
 
 LANGUAGE_CODES = {
@@ -171,7 +176,6 @@ def translate_text(text: str, target_language: str) -> str:
             if len(stripped) <= 2:
                 translated_lines.append(stripped)
                 continue
-            # Translate the line
             result = translate_client.translate(
                 stripped,
                 target_language=target_code
@@ -184,7 +188,6 @@ def translate_text(text: str, target_language: str) -> str:
         print(f"Translation error: {e}")
         return text
 
-# ── BigQuery setup ─────────────────────────────────────────────
 def init_bigquery():
     dataset_id = f"{PROJECT_ID}.{BQ_DATASET}"
     try:
@@ -203,13 +206,27 @@ def init_bigquery():
         bigquery.SchemaField("success",     "BOOLEAN",   mode="REQUIRED"),
         bigquery.SchemaField("response_ms", "INTEGER",   mode="NULLABLE"),
         bigquery.SchemaField("has_image",   "BOOLEAN",   mode="REQUIRED"),
+        bigquery.SchemaField("user_id",     "STRING",    mode="NULLABLE"),
     ]
     table = bigquery.Table(table_id, schema=schema)
     bq_client.create_table(table, exists_ok=True)
     print(f"BigQuery table ready: {BQ_DATASET}.{BQ_TABLE}")
 
+    # Appending user_id column safely if the table existed already without it
+    try:
+        table_ref = bq_client.get_table(table_id)
+        existing_schema = table_ref.schema
+        if not any(field.name == "user_id" for field in existing_schema):
+            new_schema = list(existing_schema)
+            new_schema.append(bigquery.SchemaField("user_id", "STRING", mode="NULLABLE"))
+            table_ref.schema = new_schema
+            bq_client.update_table(table_ref, ["schema"])
+            print("Appended user_id field to existing BigQuery table schema.")
+    except Exception as e:
+        print(f"Non-critical error updating schema: {e}")
+
 def log_query(query_type: str, language: str, success: bool,
-              response_ms: int, has_image: bool):
+              response_ms: int, has_image: bool, user_id: str = None):
     table_id = f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
     rows = [{
         "timestamp":   datetime.datetime.utcnow().isoformat(),
@@ -218,6 +235,7 @@ def log_query(query_type: str, language: str, success: bool,
         "success":     success,
         "response_ms": response_ms,
         "has_image":   has_image,
+        "user_id":     str(user_id) if user_id is not None else None,
     }]
     try:
         errors = bq_client.insert_rows_json(table_id, rows)
@@ -226,7 +244,6 @@ def log_query(query_type: str, language: str, success: bool,
     except Exception as e:
         print(f"BigQuery logging failed (non-critical): {e}")
 
-# ── Query classifier ───────────────────────────────────────────
 def classify_query(query: str) -> str:
     query_lower = query.lower().strip()
 
@@ -260,21 +277,19 @@ def classify_query(query: str) -> str:
 
     return "general_health"
 
-
-# ── Main query function ────────────────────────────────────────
 def query_healthbridge(
     user_query: str,
     language: str = "English",
     chat_history: list = [],
     image_bytes: bytes = None,
-    image_mime_type: str = None
+    image_mime_type: str = None,
+    user_id: str = None
 ) -> dict:
 
     start_time = datetime.datetime.utcnow()
     query_type = "error"
 
     try:
-        # Classify
         if image_bytes:
             query_type = "medical_document"
         else:
@@ -282,21 +297,14 @@ def query_healthbridge(
 
         query_text = user_query.strip() if user_query else "Analyze this medical document."
 
-        # Add language instruction for non-English responses
-        if language != "English":
-            lang_instruction = (
-                f"\n\n[LANGUAGE: {language}] "
-                f"Write your ENTIRE response in {language}. "
-                f"Keep all emoji symbols exactly as they are. "
-                f"Only translate the text. "
-                f"Each section header and each bullet point must be on its own separate line."
-            )
-        else:
-            lang_instruction = ""
+        lang_instruction = (
+            f"\n\n[LANGUAGE: {language}] "
+            f"Write your ENTIRE response in {language}. "
+            f"Keep all emoji symbols exactly as they are."
+        )
 
         enhanced_query = f"[QUERY TYPE: {query_type}]\n\nQuestion: {query_text}{lang_instruction}"
 
-        # Greetings, general health, medical documents — no RAG
         if query_type in ["greeting", "general_health", "medical_document"]:
             contents = []
             if image_bytes and image_mime_type:
@@ -320,14 +328,11 @@ def query_healthbridge(
 
             answer = response.text
 
-            # For greetings and general health in non-English
             # use Cloud Translation as fallback since Gemini handles these without RAG
             if language != "English" and query_type in ["greeting", "general_health"]:
                 answer = translate_text(answer, language)
 
         else:
-            # Clinical queries — use RAG
-            # Gemini responds directly in the target language — no post-translation needed
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=enhanced_query,
@@ -343,7 +348,6 @@ def query_healthbridge(
             )
 
             answer = response.text
-            # No translation needed — Gemini already responded in target language
 
         if not answer or len(answer.strip()) < 20:
             answer = (
@@ -351,14 +355,14 @@ def query_healthbridge(
                 "Please consult your ANM or PHC doctor directly, or call 104."
             )
 
-        # Log to BigQuery
         elapsed_ms = int((datetime.datetime.utcnow() - start_time).total_seconds() * 1000)
         log_query(
             query_type=query_type,
             language=language,
             success=True,
             response_ms=elapsed_ms,
-            has_image=bool(image_bytes)
+            has_image=bool(image_bytes),
+            user_id=user_id
         )
 
         return {
@@ -376,7 +380,8 @@ def query_healthbridge(
             language=language,
             success=False,
             response_ms=elapsed_ms,
-            has_image=bool(image_bytes)
+            has_image=bool(image_bytes),
+            user_id=user_id
         )
         return {
             "success": False,
@@ -389,12 +394,96 @@ def query_healthbridge(
             "error": str(e)
         }
 
+def get_user_analytics(user_id: str) -> dict:
+    table_id = f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
+    
+    today = datetime.date.today()
+    last_7_days = [today - datetime.timedelta(days=i) for i in range(6, -1, -1)]
+    queries_per_day = {day.strftime("%Y-%m-%d"): 0 for day in last_7_days}
+    
+    default_stats = {
+        "total_queries": 0,
+        "success_rate": 0.0,
+        "avg_response_ms": 0.0,
+        "total_image_uploads": 0,
+        "query_types": [],
+        "languages": [],
+        "queries_per_day": [{"date": day, "count": 0} for day in sorted(queries_per_day.keys())]
+    }
+    
+    try:
+        query = f"""
+            SELECT timestamp, query_type, language, success, response_ms, has_image
+            FROM `{table_id}`
+            WHERE user_id = @user_id
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("user_id", "STRING", str(user_id))
+            ]
+        )
+        
+        query_job = bq_client.query(query, job_config=job_config)
+        results = query_job.result()
+        rows = [dict(row) for row in results]
+    except Exception as e:
+        print(f"Error querying BigQuery for user {user_id}: {e}")
+        return default_stats
 
-# ── Initialize BigQuery on module load ─────────────────────────
+    if not rows:
+        return default_stats
+
+    total_queries = len(rows)
+    success_count = sum(1 for r in rows if r["success"])
+    success_rate = (success_count / total_queries * 100) if total_queries > 0 else 0.0
+    
+    response_times = [r["response_ms"] for r in rows if r["response_ms"] is not None]
+    avg_response_ms = (sum(response_times) / len(response_times)) if response_times else 0.0
+    
+    total_image_uploads = sum(1 for r in rows if r["has_image"])
+    
+    query_type_counts = {}
+    for r in rows:
+        q_type = r["query_type"]
+        if q_type:
+            query_type_counts[q_type] = query_type_counts.get(q_type, 0) + 1
+            
+    language_counts = {}
+    for r in rows:
+        lang = r["language"]
+        if lang:
+            language_counts[lang] = language_counts.get(lang, 0) + 1
+            
+    for r in rows:
+        ts = r["timestamp"]
+        # BigQuery returns datetime objects for TIMESTAMP fields. If it's a string, we parse it.
+        if isinstance(ts, str):
+            try:
+                dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).date()
+            except Exception:
+                dt = None
+        else:
+            dt = ts.date() if hasattr(ts, "date") else None
+            
+        if dt:
+            day_str = dt.strftime("%Y-%m-%d")
+            if day_str in queries_per_day:
+                queries_per_day[day_str] += 1
+                
+    queries_by_day_list = [{"date": day, "count": count} for day, count in sorted(queries_per_day.items())]
+    
+    return {
+        "total_queries": total_queries,
+        "success_rate": round(success_rate, 2),
+        "avg_response_ms": round(avg_response_ms, 2),
+        "total_image_uploads": total_image_uploads,
+        "query_types": [{"query_type": k, "count": v} for k, v in query_type_counts.items()],
+        "languages": [{"language": k, "count": v} for k, v in language_counts.items()],
+        "queries_per_day": queries_by_day_list
+    }
+
 init_bigquery()
 
-
-# ── Test ───────────────────────────────────────────────────────
 if __name__ == "__main__":
     test_queries = [
         ("hi", "English"),
