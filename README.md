@@ -18,6 +18,7 @@ The tool handles five types of clinical questions out of the box: maternal healt
 
 When a query touches on a genuine emergency, the app points the worker straight to a dedicated Emergency Action page, where she can find the nearest hospitals, call the national ambulance number, or reach the state health helpline in a single tap.
 
+Analytics Dashboard: A dedicated dashboard gives a live view into how the tool is actually being used, total queries handled, response success rate, average response latency, and how many image uploads have come through. It breaks queries down by clinical category, maternal health, child health, government schemes, referral decisions, drug protocols, and general health, and by language, so it's easy to see whether ASHA workers are actually using the tool in Tamil or Hindi as intended, not just English. A trends view shows activity over the past seven days.
 Responses are available in English, Tamil, Telugu, and Hindi, with consistent formatting and terminology across all four.
 
 ## Technical Stack
@@ -35,7 +36,7 @@ FastAPI Server (rate limited, connection pooled)
       +-- Vertex AI RAG Engine (NHM document corpus)
       +-- Gemini 2.5 Flash (multimodal clinical reasoning)
       +-- Cloud Translation API (Tamil, Telugu, Hindi, batched per response)
-      +-- Google Places API (nearest hospitals, Emergency Action page)
+      +-- Google Geocoding & Places APIs (town geocoding, nearby hospitals, Emergency Action page)
       +-- BigQuery (anonymous analytics logging)
 ```
 
