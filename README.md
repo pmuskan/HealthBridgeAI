@@ -82,6 +82,7 @@ DB_PORT=5432
 DB_NAME=healthbridge
 DB_USER=postgres
 DB_PASSWORD=your_db_password
+GOOGLE_PLACES_API_KEY=your_google_places_api_key
 ```
 
 Set up the Python environment and install dependencies:
@@ -143,6 +144,15 @@ Make sure the Cloud Run service account has these IAM roles assigned:
 - roles/bigquery.dataEditor
 - roles/cloudtranslate.user
 - roles/cloudsql.client
+
+---
+
+## Key Optimizations & Enhancements
+
+- **Mobile Responsiveness Overhaul:** Converted the static left sidebar into a collapsible overlay drawer using GPU-accelerated transition animations, added an overlay closing (`X`) button, scaled touch targets to a minimum of `44px` height, and configured input fields to bypass iOS Safari auto-zoom issues. Stacked hotline and search fields dynamically on screens under `768px`.
+- **Clinical Query Quality & Formatting:** Updated backend generation prompts to eliminate redundant checklists between `✅ Immediate Actions` (now actions only) and `🚨 Refer Immediately If` (danger signs only) to keep answers clean and clinically complete.
+- **API Rate Limiting Enforcement:** Added request throttling via `slowapi` to protect key backend entry points (`/api/chats/.../messages`, `/api/geocode`, `/api/nearby-hospitals`) from abuse and control third-party billing costs.
+- **Environment Isolation:** Cleaned all fallback credentials and domain origins from the code, loading origins and databases dynamically from environment parameters.
 
 ---
 
