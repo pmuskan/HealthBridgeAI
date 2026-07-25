@@ -6,6 +6,8 @@ from google.cloud import translate_v2 as translate
 from google.cloud import bigquery
 import datetime
 import os
+import logging
+import time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,24 +17,33 @@ REGION = os.getenv("GCP_REGION", "us-central1")
 BQ_DATASET = os.getenv("BQ_DATASET", "healthbridge_analytics")
 BQ_TABLE = os.getenv("BQ_TABLE", "query_logs")
 
+logger = logging.getLogger("healthbridge")
+
 try:
     vertexai.init(project=PROJECT_ID, location=REGION)
     corpora = list(rag.list_corpora())
 except Exception as e:
-    print(f"Non-critical: Failed to retrieve Vertex RAG corpus name in region {REGION}: {e}")
+    logger.warning(f"Non-critical: Failed to retrieve Vertex RAG corpus name in region {REGION}: {e}")
     corpora = []
 
 if not corpora and REGION != "us-central1":
-    print(f"No RAG corpora found in region {REGION}. Falling back to us-central1...")
+    logger.info(f"No RAG corpora found in region {REGION}. Falling back to us-central1...")
     REGION = "us-central1"
     try:
         vertexai.init(project=PROJECT_ID, location=REGION)
         corpora = list(rag.list_corpora())
     except Exception as e:
-        print(f"Non-critical: Failed to retrieve Vertex RAG corpus name in fallback region us-central1: {e}")
+        logger.warning(f"Non-critical: Failed to retrieve Vertex RAG corpus name in fallback region us-central1: {e}")
         corpora = []
 
-CORPUS_NAME = corpora[0].name if corpora else "healthbridge-corpus"
+if not corpora:
+    logger.error(
+        "CRITICAL ERROR: No real RAG corpus was found in the Google Cloud Vertex AI RAG Engine. "
+        "RAG functionality will not work! Falling back to the hardcoded 'healthbridge-corpus' name."
+    )
+    CORPUS_NAME = "healthbridge-corpus"
+else:
+    CORPUS_NAME = corpora[0].name
 client = genai.Client(vertexai=True, project=PROJECT_ID, location=REGION)
 bq_client = bigquery.Client(project=PROJECT_ID)
 
@@ -54,99 +65,95 @@ assistant designed for ASHA (Accredited Social Health Activist) workers in India
 ========================
 CRITICAL RULE — READ FIRST
 ========================
-ALWAYS answer the EXACT current question.
-Ignore all previous conversation context.
+ALWAYS answer the EXACT current question. Ignore all previous conversation context.
 The [QUERY TYPE] tag tells you how to respond.
-The [LANGUAGE] tag tells you which language to write your ENTIRE response in.
-If the language is not English, write every word of your response in that language.
-Keep all emoji symbols exactly as they are. Only translate the text content.
+The [LANGUAGE] tag tells you which language to write your ENTIRE response in — including
+example/template phrases below (greeting text, the general_health closing line, and the
+final disclaimer). If the language is not English, translate every word, including those,
+into that language. Keep all emoji symbols exactly as they are; only translate text content.
+Use the same translated section headers consistently for a given language across responses.
 
 ========================
-RESPONSE LENGTH
+RESPONSE LENGTH & FORMATTING
 ========================
 - Adapt length to the question. Simple question = short answer.
-- Use bullet points. Short paragraphs only when needed.
-- No filler phrases like "Great question!", "Sure!", "Of course!".
-- Never stop mid-sentence. Always complete your response fully.
-- Always put each bullet point on its own new line.
-- Always put each section header on its own new line.
+- No filler phrases like "Great question!", "Sure!", "Of course!". Never cut off mid-response.
+- Every section header on its own line. A single blank line between a header and its first
+  bullet (required for markdown list parsing). NO blank lines between bullets within the
+  same section — one bullet per line, back to back. One blank line between sections only.
+
+Example:
+✅ Immediate Actions
+
+- Wash hands with soap before preparing ORS.
+- Pour all the ORS powder into a clean container.
+- Measure 1 liter of clean drinking water and add it.
 
 ========================
 QUERY TYPE HANDLING
 ========================
 
 [QUERY TYPE: greeting]
-→ Respond warmly and briefly. 1-3 sentences only.
-→ Do NOT search NHM documents.
-→ Example: "Hi! I am HealthBridge AI, here to help ASHA workers with NHM health guidelines. What can I help you with today?"
+→ Respond warmly and briefly, 1-3 sentences. Do NOT search NHM documents.
+→ e.g. (translate if needed): "Hi! I am HealthBridge AI, here to help ASHA workers with NHM health guidelines. What can I help you with today?"
 
 [QUERY TYPE: general_health]
-→ Answer from your own training knowledge.
-→ Explain the condition simply, basic steps, when to see a doctor.
-→ Max 300 words.
-→ End with: "For official NHM protocol, consult your ANM or nearest health center."
-→ Do NOT use the structured clinical format below.
+→ Answer from your own training knowledge. Explain the condition simply: basic steps, when to see a doctor. Max 300 words. Do NOT use the structured clinical format below.
+→ End with (translate if needed): "For official NHM protocol, consult your ANM or nearest health center."
 
-[QUERY TYPE: scheme_eligibility]
-[QUERY TYPE: referral_decision]
-[QUERY TYPE: drug_protocol]
-[QUERY TYPE: child_health]
-[QUERY TYPE: maternal_health]
-→ Answer from retrieved NHM documents.
-→ Use the structured format below.
-→ NEVER hallucinate clinical facts.
-→ If the retrieved RAG documents do not contain enough details or are missing the necessary information, use your pre-trained LLM knowledge (brain search) to answer the query fully and accurately. In the 📚 Source section, state which official NHM guideline or training document typically covers this protocol, and append "(assisted by general clinical knowledge)" to the source name.
+[QUERY TYPE: scheme_eligibility / referral_decision / drug_protocol / child_health / maternal_health]
+→ Answer from retrieved NHM documents using the structured format below. NEVER hallucinate clinical facts.
+→ If retrieved documents are insufficient, you MUST still use pre-trained clinical knowledge to generate a COMPLETE, actionable response across all sections. NEVER write a meta-comment about missing/insufficient documents anywhere in the body — the ONLY places a fallback may be indicated are the ⚠️ Note line and 📚 Source line.
 
 [QUERY TYPE: medical_document]
-→ Answer based on the uploaded image (prescription, diagnostic report, lab result, clinical record, etc.) and the user query text.
-→ Carefully analyze the image. Extract names of medicines, dosage, instructions, lab findings, or diagnosis details.
-→ Translate clinical terms into simple language that an ASHA worker can understand.
-→ Map your response strictly to the structured response format below.
-→ In the 🔍 Situation section, provide a concise summary of the document, including what type of document it is and the key findings, test values, or medications.
+→ Answer based on the uploaded image + query text. Extract medicine names, dosage, instructions, lab findings, or diagnosis details; translate clinical terms into simple language.
+→ 🔍 Situation: summarize document type and key findings/medications.
+→ Do NOT suggest alternative medications or dosage changes — flag anything unusual for ANM/doctor review instead.
+→ If handwriting/image quality makes any item unclear, state "unclear from image" for that item rather than guessing.
+
+[QUERY TYPE: unclear]
+→ Ask a brief clarifying question. Do not generate a full structured response to an ambiguous query.
 
 ========================
 CORE RULES — CLINICAL QUERIES
 ========================
-1. Never diagnose new diseases (summarizing or explaining the doctor's diagnosis written in the uploaded document is allowed).
-2. Never prescribe new medicines or dosages (explaining and listing the medications and dosages already prescribed by the doctor in the image is allowed, but do not suggest any new medications or alter the dosages).
-3. Never invent numbers or thresholds not in the documents (unless using general clinical knowledge fallback, in which case specify they are standard clinical guidelines).
+1. Never diagnose new diseases (summarizing an existing written diagnosis is allowed).
+2. Never prescribe new medicines/dosages (listing what's already prescribed is allowed).
+3. Never invent numbers/thresholds. In fallback mode, state only widely-accepted standard figures (e.g. WHO/IAP) — never approximate a specific number.
 4. Always mention referral criteria.
-5. Always cite the source document (or expected source document if using general clinical knowledge).
+5. Always cite a source. In fallback mode, name the official guideline type that would typically cover this (e.g. "FOGSI/ICMR Maternal Health Guidelines"), appended with "(assisted by general clinical knowledge)". NEVER state no source was found.
 6. Simple language — ASHA workers are trained but not doctors.
-7. Complete EVERY section. Never cut off mid-response.
-8. Every section header must be on its own line. Every bullet must be on its own line.
+7. Complete every section fully.
 
 ========================
 RESPONSE FORMAT — CLINICAL QUERIES ONLY
 ========================
+Each danger sign/symptom must appear in exactly ONE place: the 🚨 Refer Immediately If section, listed fully and completely. ✅ Immediate Actions must contain concrete ACTIONS (assess, treat, transport) — never a repeated symptom checklist.
 
 🔍 Situation
 [1 line — what the ASHA worker is dealing with]
+[CONDITIONAL — include ONLY if using general knowledge fallback:]
+⚠️ Note: Limited official guidance found for this query — response includes general clinical knowledge. Please verify with ANM or PHC doctor.
 
 ✅ Immediate Actions
-[bullet — action 1]
-[bullet — action 2]
-[bullet — action 3 if needed]
+- [Concrete actions to take now — e.g. "Assess using the danger sign checklist below", "Begin Plan C fluids if severe dehydration present". Never list individual danger signs here.]
 
 📋 Follow-up
-[bullet — monitoring step]
-[bullet — next steps]
+- [monitoring step]
+- [next steps]
 
 🗣️ Counseling Points
-[bullet — message for patient or family]
-[bullet — preventive advice]
+- [message for patient/family]
+- [preventive advice]
 
 🚨 Refer Immediately If
-[bullet — danger sign 1]
-[bullet — danger sign 2]
-[bullet — danger sign 3 if needed]
+- [FULL, complete danger sign/symptom checklist — every relevant sign, listed once, never shortened for brevity]
 
 📚 Source
-[Document name only]
+[Document name. In fallback mode: expected guideline type + "(assisted by general clinical knowledge)". Never a meta-comment about missing documents.]
 
-⚠️ Disclaimer: Decision support only. Consult ANM or PHC doctor when in doubt. Emergency: Call 104.
+⚠️ Disclaimer (translate if needed): Decision support only. Consult ANM or PHC doctor when in doubt. Emergency: Call 104.
 """
-
 translate_client = translate.Client()
 
 LANGUAGE_CODES = {
@@ -157,35 +164,48 @@ LANGUAGE_CODES = {
 }
 
 def translate_text(text: str, target_language: str) -> str:
-    """Translate line by line to preserve structure."""
+    """Translate line by line to preserve structure using a single batched translation call."""
     if target_language == "English":
         return text
 
     target_code = LANGUAGE_CODES.get(target_language, "en")
     try:
         lines = text.split('\n')
-        translated_lines = []
+        translated_lines = [None] * len(lines)
+        to_translate = []
+        translate_indices = []
 
-        for line in lines:
+        for idx, line in enumerate(lines):
             stripped = line.strip()
             # Preserve empty lines
             if not stripped:
-                translated_lines.append('')
-                continue
+                translated_lines[idx] = ''
             # Preserve very short lines and emoji-only lines
-            if len(stripped) <= 2:
-                translated_lines.append(stripped)
-                continue
-            result = translate_client.translate(
-                stripped,
+            elif len(stripped) <= 2:
+                translated_lines[idx] = stripped
+            else:
+                to_translate.append(stripped)
+                translate_indices.append(idx)
+
+        if to_translate:
+            results = translate_client.translate(
+                to_translate,
                 target_language=target_code
             )
-            translated_lines.append(result["translatedText"])
+            if isinstance(results, dict):
+                results = [results]
+            for res_idx, trans_res in zip(translate_indices, results):
+                translated_lines[res_idx] = trans_res["translatedText"]
+
+        # Fallback for any lines not translated (e.g. if zip mismatch or error)
+        for idx in range(len(translated_lines)):
+            if translated_lines[idx] is None:
+                translated_lines[idx] = lines[idx]
 
         return '\n'.join(translated_lines)
 
     except Exception as e:
-        print(f"Translation error: {e}")
+        logger.error(f"Translation error: {e}")
         return text
 
 def init_bigquery():
@@ -196,7 +216,7 @@ def init_bigquery():
         dataset = bigquery.Dataset(dataset_id)
         dataset.location = "US"
         bq_client.create_dataset(dataset, exists_ok=True)
-        print(f"Created BigQuery dataset: {BQ_DATASET}")
+        logger.info(f"Created BigQuery dataset: {BQ_DATASET}")
 
     table_id = f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
     schema = [
@@ -210,7 +230,7 @@ def init_bigquery():
     ]
     table = bigquery.Table(table_id, schema=schema)
     bq_client.create_table(table, exists_ok=True)
-    print(f"BigQuery table ready: {BQ_DATASET}.{BQ_TABLE}")
+    logger.info(f"BigQuery table ready: {BQ_DATASET}.{BQ_TABLE}")
 
     # Appending user_id column safely if the table existed already without it
     try:
@@ -221,9 +241,9 @@ def init_bigquery():
             new_schema.append(bigquery.SchemaField("user_id", "STRING", mode="NULLABLE"))
             table_ref.schema = new_schema
             bq_client.update_table(table_ref, ["schema"])
-            print("Appended user_id field to existing BigQuery table schema.")
+            logger.info("Appended user_id field to existing BigQuery table schema.")
     except Exception as e:
-        print(f"Non-critical error updating schema: {e}")
+        logger.warning(f"Non-critical error updating schema: {e}")
 
 def log_query(query_type: str, language: str, success: bool,
               response_ms: int, has_image: bool, user_id: str = None):
@@ -240,12 +260,14 @@ def log_query(query_type: str, language: str, success: bool,
     try:
         errors = bq_client.insert_rows_json(table_id, rows)
         if errors:
-            print(f"BigQuery insert errors: {errors}")
+            logger.error(f"BigQuery insert errors: {errors}")
     except Exception as e:
-        print(f"BigQuery logging failed (non-critical): {e}")
+        logger.warning(f"BigQuery logging failed (non-critical): {e}")
 
 def classify_query(query: str) -> str:
     query_lower = query.lower().strip()
+    if not query_lower or (len(query_lower.split()) <= 1 and not any(w in query_lower for w in ["hi", "hello", "hey", "thanks", "vaccine", "jsy", "pmjay", "anemia", "delivery", "fever", "cough", "help", "refer", "emergency"])):
+        return "unclear"
 
     greeting_words = ["hi", "hello", "hey", "how are you", "good morning",
                       "good evening", "good afternoon", "thanks", "thank you",
@@ -277,6 +299,9 @@ def classify_query(query: str) -> str:
 
     return "general_health"
 
+RESPONSE_CACHE = {}
+CACHE_TTL_SECONDS = 3600
+
 def query_healthbridge(
     user_query: str,
     language: str = "English",
@@ -285,16 +310,46 @@ def query_healthbridge(
     image_mime_type: str = None,
     user_id: str = None
 ) -> dict:
+    """
+    Main entry point for answering NHM guideline queries.
+    This function handles query classification, checks a local TTL cache to optimize response times for identical queries,
+    retrieves context from the Vertex AI RAG engine, and queries Gemini 2.5 Flash for a clinical response.
+    If Vertex AI RAG lacks relevant documents, it falls back gracefully to a trained clinical knowledge system.
+    """
 
     start_time = datetime.datetime.utcnow()
-    query_type = "error"
+    
+    if image_bytes:
+        query_type = "medical_document"
+    else:
+        query_type = classify_query(user_query)
+
+    # ── Check Cache ────────────────────────────────────────────────
+    cache_key = None
+    if not image_bytes:
+        normalized_text = " ".join((user_query or "").lower().split())
+        cache_key = (query_type, normalized_text, language)
+        now = time.time()
+        if cache_key in RESPONSE_CACHE:
+            cached_time, cached_result = RESPONSE_CACHE[cache_key]
+            if now - cached_time < CACHE_TTL_SECONDS:
+                # Return cached result with cache_hit = True
+                res = cached_result.copy()
+                res["cache_hit"] = True
+                
+                # Log cache hit query to BigQuery (observability)
+                elapsed_ms = int((datetime.datetime.utcnow() - start_time).total_seconds() * 1000)
+                log_query(
+                    query_type=query_type,
+                    language=language,
+                    success=True,
+                    response_ms=elapsed_ms,
+                    has_image=False,
+                    user_id=user_id
+                )
+                return res
 
     try:
-        if image_bytes:
-            query_type = "medical_document"
-        else:
-            query_type = classify_query(user_query)
-
         query_text = user_query.strip() if user_query else "Analyze this medical document."
 
         lang_instruction = (
@@ -322,7 +377,7 @@ def query_healthbridge(
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT,
                     temperature=0.5,
-                    max_output_tokens=1024,
+                    max_output_tokens=4096,
                 ),
             )
 
@@ -365,13 +420,20 @@ def query_healthbridge(
             user_id=user_id
         )
 
-        return {
+        result = {
             "success": True,
             "response": answer,
             "query_type": query_type,
             "language": language,
-            "error": None
+            "error": None,
+            "cache_hit": False
         }
+
+        # Cache successful text queries
+        if cache_key is not None:
+            RESPONSE_CACHE[cache_key] = (time.time(), result)
+
+        return result
 
     except Exception as e:
         elapsed_ms = int((datetime.datetime.utcnow() - start_time).total_seconds() * 1000)
@@ -391,7 +453,8 @@ def query_healthbridge(
             ),
             "query_type": "error",
             "language": language,
-            "error": str(e)
+            "error": str(e),
+            "cache_hit": False
         }
 
 def get_user_analytics(user_id: str) -> dict:
@@ -427,7 +490,7 @@ def get_user_analytics(user_id: str) -> dict:
         results = query_job.result()
         rows = [dict(row) for row in results]
     except Exception as e:
-        print(f"Error querying BigQuery for user {user_id}: {e}")
+        logger.error(f"Error querying BigQuery for user {user_id}: {e}")
         return default_stats
 
     if not rows:

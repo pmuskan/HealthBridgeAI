@@ -4,26 +4,72 @@ import datetime
 import bcrypt
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from psycopg2.pool import ThreadedConnectionPool
+import threading
+import time
+import logging
 from dotenv import load_dotenv
 
 load_dotenv()
+logger = logging.getLogger("healthbridge.database")
 
 # ── DB Credentials ─────────────────────────────────────────────
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME", "healthbridge")
 DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+
+# ── Connection Pool ────────────────────────────────────────────
+_pool = None
+_pool_lock = threading.Lock()
+
+def init_pool():
+    global _pool
+    if _pool is None:
+        with _pool_lock:
+            if _pool is None:
+                try:
+                    _pool = ThreadedConnectionPool(
+                        minconn=1,
+                        maxconn=20,
+                        host=DB_HOST,
+                        port=DB_PORT,
+                        database=DB_NAME,
+                        user=DB_USER,
+                        password=DB_PASSWORD
+                    )
+                    logger.info("Database connection pool initialized successfully.")
+                except Exception as e:
+                    logger.critical(f"Failed to initialize database connection pool: {e}")
+                    raise
 
 def get_connection():
-    """Returns a connection to the healthbridge database."""
-    return psycopg2.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        database=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD
-    )
+    """Returns a connection from the connection pool."""
+    init_pool()
+    return _pool.getconn()
+
+def release_connection(conn):
+    """Safely rolls back any pending transaction and returns the connection to the pool."""
+    if conn:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        if _pool:
+            try:
+                _pool.putconn(conn)
+            except Exception as e:
+                logger.error(f"Error returning connection to pool: {e}")
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        else:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 def init_db():
     """
@@ -48,11 +94,11 @@ def init_db():
             # PostgreSQL does not allow parameterization of identifiers, so we build it directly.
             # DB_NAME is configured in our local .env.
             cur.execute(f'CREATE DATABASE "{DB_NAME}"')
-            print(f"Created database: {DB_NAME}")
+            logger.info(f"Created database: {DB_NAME}")
         cur.close()
         conn.close()
     except Exception as e:
-        print(f"Database creation check failed (continuing in case DB exists): {e}")
+        logger.warning(f"Database creation check failed (continuing in case DB exists): {e}")
 
     # 2. Create tables
     conn = get_connection()
@@ -93,6 +139,8 @@ def init_db():
     """)
 
     # Messages table
+    # Note: image_path stores only a boolean-ish marker string like "uploaded"
+    # or is NULL, as images are processed in-memory only and never saved on disk.
     cur.execute("""
     CREATE TABLE IF NOT EXISTS messages (
         id VARCHAR(255) PRIMARY KEY,
@@ -112,8 +160,44 @@ def init_db():
     """)
 
     cur.close()
-    conn.close()
-    print("Database tables initialized successfully.")
+    release_connection(conn)
+    logger.info("Database tables initialized successfully.")
+    
+    # Run startup cleanup of expired sessions and start the periodic task
+    try:
+        cleanup_expired_sessions()
+        start_periodic_cleanup()
+    except Exception as e:
+        logger.error(f"Failed to run startup session cleanup or start thread: {e}")
+
+def cleanup_expired_sessions():
+    """Deletes expired sessions from the sessions table."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cur.execute("DELETE FROM sessions WHERE expires_at < %s", (now,))
+        conn.commit()
+        logger.info("Expired sessions cleaned up successfully.")
+    except Exception as e:
+        logger.error(f"Failed to cleanup expired sessions: {e}")
+    finally:
+        cur.close()
+        release_connection(conn)
+
+def _periodic_cleanup_loop():
+    while True:
+        # Clean up every hour (3600 seconds)
+        time.sleep(3600)
+        try:
+            cleanup_expired_sessions()
+        except Exception as e:
+            logger.error(f"Error in periodic sessions cleanup: {e}")
+
+def start_periodic_cleanup():
+    thread = threading.Thread(target=_periodic_cleanup_loop, daemon=True)
+    thread.start()
+    logger.info("Periodic sessions cleanup thread started.")
 
 # ── Password Helpers ───────────────────────────────────────────
 def hash_password(password: str) -> str:
@@ -143,7 +227,7 @@ def create_user(name: str, email: str, password: str, role: str = "ASHA Worker")
         raise ValueError("User with this email already exists")
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 def verify_user(email: str, password: str):
     email_clean = email.strip().lower()
@@ -162,7 +246,7 @@ def verify_user(email: str, password: str):
         return None
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 # ── Session Management ─────────────────────────────────────────
 def create_session(user_id: int) -> str:
@@ -181,7 +265,7 @@ def create_session(user_id: int) -> str:
         return token
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 def get_user_by_token(token: str):
     conn = get_connection()
@@ -201,7 +285,7 @@ def get_user_by_token(token: str):
         return dict(user) if user else None
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 def delete_session(token: str):
     conn = get_connection()
@@ -211,7 +295,7 @@ def delete_session(token: str):
         conn.commit()
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 # ── Chats CRUD ──────────────────────────────────────────────────
 def create_chat(user_id: int, title: str, language: str = "English") -> dict:
@@ -228,7 +312,7 @@ def create_chat(user_id: int, title: str, language: str = "English") -> dict:
         return dict(chat)
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 def get_user_chats(user_id: int) -> list:
     conn = get_connection()
@@ -242,7 +326,7 @@ def get_user_chats(user_id: int) -> list:
         return [dict(chat) for chat in chats]
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 def update_chat_title(chat_id: str, title: str):
     conn = get_connection()
@@ -252,7 +336,7 @@ def update_chat_title(chat_id: str, title: str):
         conn.commit()
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 def delete_chat(user_id: int, chat_id: str):
     conn = get_connection()
@@ -262,7 +346,7 @@ def delete_chat(user_id: int, chat_id: str):
         conn.commit()
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 # ── Messages CRUD ───────────────────────────────────────────────
 def add_message(chat_id: str, role: str, content: str, query_type: str = "general_health", language: str = "English", image_path: str = None) -> dict:
@@ -283,7 +367,7 @@ def add_message(chat_id: str, role: str, content: str, query_type: str = "genera
         return dict(msg)
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 def get_chat_messages(chat_id: str) -> list:
     conn = get_connection()
@@ -297,4 +381,4 @@ def get_chat_messages(chat_id: str) -> list:
         return [dict(msg) for msg in messages]
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)

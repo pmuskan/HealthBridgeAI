@@ -150,7 +150,7 @@ Make sure the Cloud Run service account has these IAM roles assigned:
 
 Every clinical answer cites the NHM source document it came from. The tool never diagnoses diseases, never prescribes medication, and always ends with referral criteria so the ASHA worker knows when to escalate to a PHC or ANM.
 
-Patient images are processed in memory and never stored. Only anonymous metadata like query type and response time is logged to BigQuery. No personal health information ever touches the database.
+Patient images are processed strictly in-memory and are never written to local disk or database storage. Only anonymous metadata (like query type, language, and response time) is logged to BigQuery for usage analytics. No personal health information ever touches the database.
 
 A disclaimer appears on every response reminding workers that this tool supports their judgment, not replaces it. The national health helpline number 104 is shown prominently throughout the app.
 

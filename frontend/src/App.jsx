@@ -1,35 +1,57 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from "react";
 import {
-  LogOut, Plus, MessageSquare, Trash2, Globe, Menu, X,
-  Send, Copy, Check, Baby, AlertTriangle, HeartPulse,
-  ClipboardList, Stethoscope, User, HelpCircle, Activity,
-  Paperclip, BarChart2
-} from 'lucide-react';
-import Analytics from './Analytics';
+  LogOut,
+  Plus,
+  MessageSquare,
+  Trash2,
+  Globe,
+  Menu,
+  X,
+  Send,
+  Copy,
+  Check,
+  Baby,
+  AlertTriangle,
+  HeartPulse,
+  ClipboardList,
+  Stethoscope,
+  Activity,
+  Paperclip,
+  BarChart2,
+} from "lucide-react";
+import Analytics from "./Analytics";
+import EmergencyPanel from "./EmergencyPanel";
+import ambulanceIcon from "./assets/ambulance.png";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
-const API_BASE = window.location.port === "5173" ? "http://localhost:8000/api" : "/api";
+const API_BASE =
+  window.location.port === "5173"
+    ? `http://${window.location.hostname}:8000/api`
+    : "/api";
 
 export default function App() {
   // ── Auth States ────────────────────────────────────────────────
-  const [token, setToken] = useState(localStorage.getItem('hb_token') || '');
+  const [token, setToken] = useState(localStorage.getItem("hb_token") || "");
   const [user, setUser] = useState(null);
-  const [authMode, setAuthMode] = useState('login'); // 'login' or 'signup'
-  const [authError, setAuthError] = useState('');
+  const [authMode, setAuthMode] = useState("login"); // 'login' or 'signup'
+  const [authError, setAuthError] = useState("");
 
   // Auth Form Inputs
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [name, setName] = useState('');
-  const [role, setRole] = useState('ASHA Worker');
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [role, setRole] = useState("ASHA Worker");
 
   // ── Chat States ────────────────────────────────────────────────
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatId] = useState(null);
   const [messages, setMessages] = useState([]);
-  const [language, setLanguage] = useState('English');
-  const [input, setInput] = useState('');
+  const [language, setLanguage] = useState("English");
+  const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [activeView, setActiveView] = useState('chat'); // 'chat' or 'analytics'
+  const [activeView, setActiveView] = useState("chat"); // 'chat', 'analytics', or 'emergency'
+  const [emergencyContext, setEmergencyContext] = useState(null); // { chatId, messageId, queryText }
 
   // ── Layout & Status States ─────────────────────────────────────
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -47,15 +69,15 @@ export default function App() {
   // Fetch user profile on load or token change
   useEffect(() => {
     if (token) {
-      localStorage.setItem('hb_token', token);
+      localStorage.setItem("hb_token", token);
       fetchUserProfile();
     } else {
-      localStorage.removeItem('hb_token');
+      localStorage.removeItem("hb_token");
       setUser(null);
       setChats([]);
       setActiveChatId(null);
       setMessages([]);
-      setActiveView('chat');
+      setActiveView("chat");
     }
   }, [token]);
 
@@ -74,7 +96,7 @@ export default function App() {
   // Auto-expand textarea on typing
   useEffect(() => {
     if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = "auto";
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 120)}px`;
     }
   }, [input]);
@@ -101,14 +123,14 @@ export default function App() {
   };
 
   const getAuthHeaders = () => ({
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${token}`
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
   });
 
   const fetchUserProfile = async () => {
     try {
       const res = await fetch(`${API_BASE}/auth/me`, {
-        headers: getAuthHeaders()
+        headers: getAuthHeaders(),
       });
       if (res.ok) {
         const data = await res.json();
@@ -116,7 +138,7 @@ export default function App() {
         fetchChats();
       } else {
         // Token is invalid/expired
-        setToken('');
+        setToken("");
       }
     } catch (err) {
       console.error("Profile fetch error:", err);
@@ -128,7 +150,7 @@ export default function App() {
   const fetchChats = async () => {
     try {
       const res = await fetch(`${API_BASE}/chats`, {
-        headers: getAuthHeaders()
+        headers: getAuthHeaders(),
       });
       if (res.ok) {
         const data = await res.json();
@@ -147,11 +169,29 @@ export default function App() {
   const fetchMessages = async (chatId) => {
     try {
       const res = await fetch(`${API_BASE}/chats/${chatId}`, {
-        headers: getAuthHeaders()
+        headers: getAuthHeaders(),
       });
       if (res.ok) {
         const data = await res.json();
-        setMessages(data.messages);
+        setMessages((prev) => {
+          // Merge database messages with current state to preserve local image blob/data URLs
+          return data.messages.map((dbMsg) => {
+            if (dbMsg.image_path === "uploaded") {
+              const localMsg = prev.find(
+                (m) =>
+                  m.role === "user" &&
+                  m.content === dbMsg.content &&
+                  m.image_path &&
+                  (m.image_path.startsWith("blob:") ||
+                    m.image_path.startsWith("data:")),
+              );
+              if (localMsg) {
+                return { ...dbMsg, image_path: localMsg.image_path };
+              }
+            }
+            return dbMsg;
+          });
+        });
       }
     } catch (err) {
       console.error("Messages fetch error:", err);
@@ -159,79 +199,81 @@ export default function App() {
   };
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
   // ── Auth Handlers ──────────────────────────────────────────────
   const handleLogin = async (e) => {
     e.preventDefault();
-    setAuthError('');
+    setAuthError("");
     if (!email || !password) {
-      setAuthError('Please fill in all fields');
+      setAuthError("Please fill in all fields");
       return;
     }
 
     try {
       const res = await fetch(`${API_BASE}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
       });
 
       const data = await res.json();
       if (res.ok) {
         setToken(data.token);
         // Clear fields
-        setEmail('');
-        setPassword('');
+        setEmail("");
+        setPassword("");
       } else {
-        setAuthError(data.detail || 'Login failed. Please verify credentials.');
+        setAuthError(data.detail || "Login failed. Please verify credentials.");
       }
     } catch (err) {
-      setAuthError('Unable to connect to server. Check your connection.');
+      setAuthError("Unable to connect to server. Check your connection.");
     }
   };
 
   const handleSignup = async (e) => {
     e.preventDefault();
-    setAuthError('');
+    setAuthError("");
     if (!name || !email || !password) {
-      setAuthError('Please fill in all fields');
+      setAuthError("Please fill in all fields");
       return;
     }
 
     try {
       const res = await fetch(`${API_BASE}/auth/signup`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email, password, role })
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email, password, role }),
       });
 
       const data = await res.json();
       if (res.ok) {
         setToken(data.token);
         // Clear fields
-        setName('');
-        setEmail('');
-        setPassword('');
+        setName("");
+        setEmail("");
+        setPassword("");
       } else {
-        setAuthError(data.detail || 'Signup failed. Email may already be in use.');
+        setAuthError(
+          data.detail || "Signup failed. Email may already be in use.",
+        );
       }
     } catch (err) {
-      setAuthError('Unable to connect to server. Check your connection.');
+      setAuthError("Unable to connect to server. Check your connection.");
     }
   };
 
   const handleLogout = async () => {
     try {
       await fetch(`${API_BASE}/auth/logout`, {
-        method: 'POST',
-        headers: getAuthHeaders()
+        method: "POST",
+        headers: getAuthHeaders(),
       });
     } catch (err) {
       console.error("Logout request error:", err);
     } finally {
-      setToken('');
+      setToken("");
     }
   };
 
@@ -239,16 +281,16 @@ export default function App() {
   const handleStartNewChat = async () => {
     try {
       const res = await fetch(`${API_BASE}/chats`, {
-        method: 'POST',
+        method: "POST",
         headers: getAuthHeaders(),
-        body: JSON.stringify({ title: "New Conversation", language })
+        body: JSON.stringify({ title: "New Conversation", language }),
       });
       if (res.ok) {
         const data = await res.json();
         setChats([data.chat, ...chats]);
         setActiveChatId(data.chat.id);
         setMessages([]);
-        setActiveView('chat');
+        setActiveView("chat");
         setIsSidebarOpen(false);
       }
     } catch (err) {
@@ -260,11 +302,11 @@ export default function App() {
     e.stopPropagation();
     try {
       const res = await fetch(`${API_BASE}/chats/${chatId}`, {
-        method: 'DELETE',
-        headers: getAuthHeaders()
+        method: "DELETE",
+        headers: getAuthHeaders(),
       });
       if (res.ok) {
-        const updatedChats = chats.filter(c => c.id !== chatId);
+        const updatedChats = chats.filter((c) => c.id !== chatId);
         setChats(updatedChats);
         if (activeChatId === chatId) {
           if (updatedChats.length > 0) {
@@ -295,12 +337,17 @@ export default function App() {
 
     // 1. If no active chat, create one first
     if (!targetChatId) {
-      const defaultTitle = input.trim() || (selectedFile ? "Medical Document Analysis" : "New Conversation");
+      const defaultTitle =
+        input.trim() ||
+        (selectedFile ? "Medical Document Analysis" : "New Conversation");
       try {
         const res = await fetch(`${API_BASE}/chats`, {
-          method: 'POST',
+          method: "POST",
           headers: getAuthHeaders(),
-          body: JSON.stringify({ title: defaultTitle.substring(0, 30), language })
+          body: JSON.stringify({
+            title: defaultTitle.substring(0, 30),
+            language,
+          }),
         });
         if (res.ok) {
           const data = await res.json();
@@ -319,41 +366,41 @@ export default function App() {
 
     const currentInput = input.trim();
     const currentFile = selectedFile;
-    
-    setInput('');
+
+    setInput("");
     setSelectedFile(null);
     if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+      fileInputRef.current.value = "";
     }
 
     // Add temporary messages to UI immediately
     const tempUserMsg = {
-      id: 'temp-user-' + Date.now(),
-      role: 'user',
+      id: "temp-user-" + Date.now(),
+      role: "user",
       content: currentInput || "Uploaded a medical document/prescription.",
       language: language,
       image_path: currentFile ? URL.createObjectURL(currentFile) : null,
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
     };
-    setMessages(prev => [...prev, tempUserMsg]);
+    setMessages((prev) => [...prev, tempUserMsg]);
     setLoading(true);
 
     try {
       const formData = new FormData();
       if (currentInput) {
-        formData.append('query', currentInput);
+        formData.append("query", currentInput);
       }
-      formData.append('language', language);
+      formData.append("language", language);
       if (currentFile) {
-        formData.append('image', currentFile);
+        formData.append("image", currentFile);
       }
 
       const res = await fetch(`${API_BASE}/chats/${targetChatId}/messages`, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Authorization': `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
         },
-        body: formData
+        body: formData,
       });
 
       if (res.ok) {
@@ -361,15 +408,15 @@ export default function App() {
 
         // Append bot message to state
         const tempBotMsg = {
-          id: 'temp-bot-' + Date.now(),
-          role: 'assistant',
+          id: "temp-bot-" + Date.now(),
+          role: "assistant",
           content: data.response,
           query_type: data.query_type,
           language: data.language,
-          created_at: new Date().toISOString()
+          created_at: new Date().toISOString(),
         };
 
-        setMessages(prev => [...prev, tempBotMsg]);
+        setMessages((prev) => [...prev, tempBotMsg]);
 
         // Refresh sidebar so that if this was the first message, the auto-updated title is loaded.
         fetchChats();
@@ -409,14 +456,46 @@ export default function App() {
 
   // ── Badge Helpers ──────────────────────────────────────────────
   const badgeMap = {
-    maternal_health: { icon: <HeartPulse className="w-3.5 h-3.5" />, label: "Maternal", className: "maternal" },
-    child_health: { icon: <Baby className="w-3.5 h-3.5" />, label: "Child", className: "child" },
-    scheme_eligibility: { icon: <ClipboardList className="w-3.5 h-3.5" />, label: "Scheme", className: "scheme" },
-    referral_decision: { icon: <AlertTriangle className="w-3.5 h-3.5" />, label: "Referral", className: "referral" },
-    drug_protocol: { icon: <Stethoscope className="w-3.5 h-3.5" />, label: "Drug", className: "drug" },
-    general_health: { icon: <Activity className="w-3.5 h-3.5" />, label: "General", className: "general" },
-    medical_document: { icon: <ClipboardList className="w-3.5 h-3.5" />, label: "Document", className: "document" },
-    error: { icon: <AlertTriangle className="w-3.5 h-3.5" />, label: "Error", className: "general" },
+    maternal_health: {
+      icon: <HeartPulse className="w-3.5 h-3.5" />,
+      label: "Maternal",
+      className: "maternal",
+    },
+    child_health: {
+      icon: <Baby className="w-3.5 h-3.5" />,
+      label: "Child",
+      className: "child",
+    },
+    scheme_eligibility: {
+      icon: <ClipboardList className="w-3.5 h-3.5" />,
+      label: "Scheme",
+      className: "scheme",
+    },
+    referral_decision: {
+      icon: <AlertTriangle className="w-3.5 h-3.5" />,
+      label: "Referral",
+      className: "referral",
+    },
+    drug_protocol: {
+      icon: <Stethoscope className="w-3.5 h-3.5" />,
+      label: "Drug",
+      className: "drug",
+    },
+    general_health: {
+      icon: <Activity className="w-3.5 h-3.5" />,
+      label: "General",
+      className: "general",
+    },
+    medical_document: {
+      icon: <ClipboardList className="w-3.5 h-3.5" />,
+      label: "Document",
+      className: "document",
+    },
+    error: {
+      icon: <AlertTriangle className="w-3.5 h-3.5" />,
+      label: "Error",
+      className: "general",
+    },
   };
 
   // ── Render Auth Page ───────────────────────────────────────────
@@ -432,7 +511,7 @@ export default function App() {
 
           {authError && <div className="auth-error">{authError}</div>}
 
-          {authMode === 'login' ? (
+          {authMode === "login" ? (
             <form onSubmit={handleLogin}>
               <div className="auth-form-group">
                 <label>Email Address</label>
@@ -456,10 +535,18 @@ export default function App() {
                   required
                 />
               </div>
-              <button type="submit" className="auth-button">Login →</button>
+              <button type="submit" className="auth-button">
+                Login →
+              </button>
               <div className="auth-footer">
-                Don't have an account?{' '}
-                <span className="auth-link" onClick={() => { setAuthMode('signup'); setAuthError(''); }}>
+                Don't have an account?{" "}
+                <span
+                  className="auth-link"
+                  onClick={() => {
+                    setAuthMode("signup");
+                    setAuthError("");
+                  }}
+                >
                   Sign Up
                 </span>
               </div>
@@ -511,10 +598,18 @@ export default function App() {
                   <option value="PHC Staff">PHC Staff / Doctor</option>
                 </select>
               </div>
-              <button type="submit" className="auth-button">Register & Sign Up</button>
+              <button type="submit" className="auth-button">
+                Register & Sign Up
+              </button>
               <div className="auth-footer">
-                Already have an account?{' '}
-                <span className="auth-link" onClick={() => { setAuthMode('login'); setAuthError(''); }}>
+                Already have an account?{" "}
+                <span
+                  className="auth-link"
+                  onClick={() => {
+                    setAuthMode("login");
+                    setAuthError("");
+                  }}
+                >
                   Log In
                 </span>
               </div>
@@ -527,28 +622,27 @@ export default function App() {
 
   // Helper to get user initial
   const getUserInitial = () => {
-    if (!user.name) return 'A';
+    if (!user.name) return "A";
     return user.name.charAt(0).toUpperCase();
   };
 
   // ── Render Application Page ─────────────────────────────────────
   return (
     <div className="app-container">
-
       {/* Mobile Sidebar overlay */}
       <div
-        className={`sidebar-overlay ${isSidebarOpen ? 'active' : ''}`}
+        className={`sidebar-overlay ${isSidebarOpen ? "active" : ""}`}
         onClick={() => setIsSidebarOpen(false)}
       />
 
       {/* Sidebar Panel */}
-      <aside className={`sidebar ${isSidebarOpen ? 'open' : ''}`}>
+      <aside className={`sidebar ${isSidebarOpen ? "open" : ""}`}>
         <div className="sidebar-profile">
-          <div className="profile-avatar">
-            {getUserInitial()}
-          </div>
+          <div className="profile-avatar">{getUserInitial()}</div>
           <div className="profile-info">
-            <div className="profile-name" title={user.name}>{user.name}</div>
+            <div className="profile-name" title={user.name}>
+              {user.name}
+            </div>
             <div className="profile-role">{user.role}</div>
           </div>
           <button
@@ -557,6 +651,13 @@ export default function App() {
             title="Log Out"
           >
             <LogOut className="w-5 h-5" />
+          </button>
+          <button
+            className="sidebar-close-btn"
+            onClick={() => setIsSidebarOpen(false)}
+            title="Close Menu"
+          >
+            <X className="w-5 h-5" />
           </button>
         </div>
 
@@ -571,24 +672,36 @@ export default function App() {
           <div className="history-title">Chat Threads</div>
           <div className="history-list">
             {chats.length === 0 ? (
-              <div style={{ textAlign: 'center', color: '#9ca3af', padding: '16px 0', fontSize: '13px' }}>
+              <div
+                style={{
+                  textAlign: "center",
+                  color: "#9ca3af",
+                  padding: "16px 0",
+                  fontSize: "13px",
+                }}
+              >
                 No past sessions
               </div>
             ) : (
               chats.map((c) => (
                 <div
                   key={c.id}
-                  className={`history-item ${activeChatId === c.id ? 'active' : ''}`}
+                  className={`history-item ${activeChatId === c.id ? "active" : ""}`}
                   onClick={() => {
                     setActiveChatId(c.id);
                     setLanguage(c.language);
-                    setActiveView('chat');
+                    setActiveView("chat");
                     setIsSidebarOpen(false);
                   }}
                 >
                   <div className="history-meta">
-                    <MessageSquare className="w-4 h-4 flex-shrink-0" style={{ opacity: 0.7 }} />
-                    <span className="history-text" title={c.title}>{c.title}</span>
+                    <MessageSquare
+                      className="w-4 h-4 flex-shrink-0"
+                      style={{ opacity: 0.7 }}
+                    />
+                    <span className="history-text" title={c.title}>
+                      {c.title}
+                    </span>
                   </div>
                   <button
                     className="history-delete-btn"
@@ -603,17 +716,58 @@ export default function App() {
           </div>
         </div>
 
-        <div className="sidebar-analytics-link" style={{ padding: '0 12px 16px 12px', borderBottom: '1.5px solid var(--primary-border)' }}>
+        <div
+          className="sidebar-analytics-link"
+          style={{ padding: "0 12px 8px 12px" }}
+        >
           <div
-            className={`history-item ${activeView === 'analytics' ? 'active' : ''}`}
+            className={`history-item ${activeView === "analytics" ? "active" : ""}`}
             onClick={() => {
-              setActiveView('analytics');
+              setActiveView("analytics");
               setIsSidebarOpen(false);
             }}
           >
             <div className="history-meta">
-              <BarChart2 className="w-4 h-4 flex-shrink-0" style={{ opacity: 0.7 }} />
+              <BarChart2
+                className="w-4 h-4 flex-shrink-0"
+                style={{ opacity: 0.7 }}
+              />
               <span className="history-text">Analytics Dashboard</span>
+            </div>
+          </div>
+        </div>
+
+        <div
+          className="sidebar-emergency-link"
+          style={{
+            padding: "0 12px 16px 12px",
+            borderBottom: "1.5px solid var(--primary-border)",
+          }}
+        >
+          <div
+            className={`history-item ${activeView === "emergency" ? "active" : ""}`}
+            onClick={() => {
+              setActiveView("emergency");
+              setEmergencyContext(null); // Clear context if clicked directly from sidebar
+              setIsSidebarOpen(false);
+            }}
+          >
+            <div
+              className="history-meta"
+              style={{ display: "flex", alignItems: "center", gap: "8px" }}
+            >
+              <img
+                src={ambulanceIcon}
+                style={{
+                  width: "16px",
+                  height: "16px",
+                  objectFit: "contain",
+                  opacity: activeView === "emergency" ? 1.0 : 0.7,
+                }}
+                className="flex-shrink-0"
+                alt="Ambulance"
+              />
+              <span className="history-text">Emergency Action</span>
             </div>
           </div>
         </div>
@@ -638,232 +792,392 @@ export default function App() {
 
       {/* Main Chat Workspace */}
       <main className="main-content">
-        {activeView === 'analytics' ? (
-          <Analytics token={token} onClose={() => setActiveView('chat')} />
+        {activeView === "analytics" ? (
+          <Analytics token={token} onClose={() => setActiveView("chat")} />
+        ) : activeView === "emergency" ? (
+          <div className="emergency-page-container">
+            <header className="emergency-page-header">
+              <button
+                className="analytics-back-btn"
+                onClick={() => setActiveView("chat")}
+              >
+                ← Back to Chat
+              </button>
+              <h2>🚨 Emergency Referral Action</h2>
+            </header>
+            <div className="emergency-page-content">
+              <EmergencyPanel
+                token={token}
+                apiBase={API_BASE}
+                context={emergencyContext}
+                onGoToChat={(chatId) => {
+                  setActiveChatId(chatId);
+                  setActiveView("chat");
+                }}
+              />
+            </div>
+          </div>
         ) : (
           <>
             {/* App Bar */}
-        <header className="header-bar">
-          <div className="header-left">
-            <button
-              className="sidebar-toggle-btn"
-              onClick={() => setIsSidebarOpen(true)}
-            >
-              <Menu className="w-5 h-5" />
-            </button>
-            <div className="header-title">
-              <span className="header-logo">🏥</span>
-              <h1>HealthBridge AI</h1>
-              <span className="header-subtitle">NHM Decision Support</span>
-            </div>
-          </div>
-
-          <div className="header-right">
-            <div className="status-badge" style={{ color: isBackendHealthy ? '#047857' : '#ef4444', backgroundColor: isBackendHealthy ? '#f0fdf4' : '#fee2e2' }}>
-              <span className="status-dot" style={{ backgroundColor: isBackendHealthy ? '#10b981' : '#ef4444' }} />
-              {isBackendHealthy ? 'Cloud Connected' : 'Local Offline'}
-            </div>
-          </div>
-        </header>
-
-        {/* Conversation Area */}
-        <section className="messages-container">
-          {messages.length === 0 ? (
-            /* Welcome Dashboard (Empty state) */
-            <div className="welcome-container">
-              <div className="welcome-hero">
-                <span className="welcome-logo">🌿</span>
-                <h2>Namaste, {user.name.split(' ')[0]} Didi</h2>
-                <p>Verify National Health Mission clinical guidelines, referral criteria, or eligibility protocols instantly.</p>
-              </div>
-
-              <div className="quick-actions-section">
-                <div className="quick-actions-title">Suggested Inquiries</div>
-                <div className="quick-actions-grid">
-                  <div
-                    className="quick-action-card"
-                    onClick={() => handleQuickAction("What are danger signs in a child under 5 that need immediate referral?")}
-                  >
-                    <span className="quick-action-icon">👶</span>
-                    <h3>Child Danger Signs</h3>
-                    <p>Referral criteria for infants and kids under 5 years old.</p>
-                  </div>
-                  <div
-                    className="quick-action-card"
-                    onClick={() => handleQuickAction("What should I check during a home visit for a pregnant woman in third trimester?")}
-                  >
-                    <span className="quick-action-icon">🤰</span>
-                    <h3>Maternal Care Visit</h3>
-                    <p>Antenatal & postnatal protocols for third-trimester checks.</p>
-                  </div>
-                  <div
-                    className="quick-action-card"
-                    onClick={() => handleQuickAction("Who is eligible for Janani Suraksha Yojana and what documents are needed?")}
-                  >
-                    <span className="quick-action-icon">📋</span>
-                    <h3>JSY Eligibility Rules</h3>
-                    <p>Janani Suraksha Yojana benefits and required paperwork.</p>
-                  </div>
-                  <div
-                    className="quick-action-card"
-                    onClick={() => handleQuickAction("What is the protocol for treating anaemia in pregnant women?")}
-                  >
-                    <span className="quick-action-icon">💊</span>
-                    <h3>Anaemia Treatment Protocol</h3>
-                    <p>Standard medicine dosages and monitoring rules.</p>
-                  </div>
+            <header className="header-bar">
+              <div className="header-left">
+                <button
+                  className="sidebar-toggle-btn"
+                  onClick={() => setIsSidebarOpen(true)}
+                >
+                  <Menu className="w-5 h-5" />
+                </button>
+                <div className="header-title">
+                  <span className="header-logo">🏥</span>
+                  <h1>HealthBridge AI</h1>
+                  <span className="header-subtitle">NHM Decision Support</span>
                 </div>
               </div>
-            </div>
-          ) : (
-            /* Chat Feed */
-            <div className="messages-list">
-              {messages.map((m) => {
-                const isUser = m.role === 'user';
-                const badgeInfo = isUser ? null : (badgeMap[m.query_type] || badgeMap.general_health);
 
-                return (
-                  <div
-                    key={m.id}
-                    className={`message-wrapper ${isUser ? 'user' : 'assistant'}`}
-                  >
-                    <div className={`message-bubble ${isUser ? 'user' : `assistant ${badgeInfo?.className || 'general'}`}`}>
+              <div className="header-right">
+                <div
+                  className="status-badge"
+                  style={{
+                    color: isBackendHealthy ? "#047857" : "#ef4444",
+                    backgroundColor: isBackendHealthy ? "#f0fdf4" : "#fee2e2",
+                  }}
+                >
+                  <span
+                    className="status-dot"
+                    style={{
+                      backgroundColor: isBackendHealthy ? "#10b981" : "#ef4444",
+                    }}
+                  />
+                  {isBackendHealthy ? "Cloud Connected" : "Local Offline"}
+                </div>
+              </div>
+            </header>
 
-                      {!isUser && (
-                        <div className="message-header">
-                          <span className={`category-badge ${badgeInfo?.className || 'general'}`}>
-                            {badgeInfo?.icon}
-                            {badgeInfo?.label}
-                          </span>
-                          <span className="message-lang">{m.language || 'English'}</span>
-                          <button
-                            className="message-copy-btn"
-                            onClick={() => copyToClipboard(m.content, m.id)}
-                            title="Copy Response"
-                          >
-                            {copiedMessageId === m.id ? (
-                              <Check className="w-3.5 h-3.5 text-green-600" />
-                            ) : (
-                              <Copy className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                        </div>
-                      )}
+            {/* Conversation Area */}
+            <section className="messages-container">
+              {messages.length === 0 ? (
+                /* Welcome Dashboard (Empty state) */
+                <div className="welcome-container">
+                  <div className="welcome-hero">
+                    <span className="welcome-logo">🌿</span>
+                    <h2>Namaste, {user.name.split(" ")[0]} Didi</h2>
+                    <p>
+                      Verify National Health Mission clinical guidelines,
+                      referral criteria, or eligibility protocols instantly.
+                    </p>
+                  </div>
 
-                      <div className="message-body">
-                        {m.image_path && (
-                          <div className="message-image-container">
-                            <img
-                              src={m.image_path.startsWith('blob:') ? m.image_path : `${API_BASE.replace('/api', '')}/${m.image_path}`}
-                              alt="Uploaded medical doc"
-                              className="message-image"
-                              onClick={() => window.open(m.image_path.startsWith('blob:') ? m.image_path : `${API_BASE.replace('/api', '')}/${m.image_path}`, '_blank')}
-                            />
-                          </div>
-                        )}
-                        {m.content.split('\n').map((line, i) => (
-                          <span key={i}>
-                            {line}
-                            <br />
-                          </span>
-                        ))}
+                  <div className="quick-actions-section">
+                    <div className="quick-actions-title">
+                      Suggested Inquiries
+                    </div>
+                    <div className="quick-actions-grid">
+                      <div
+                        className="quick-action-card"
+                        onClick={() =>
+                          handleQuickAction(
+                            "What are danger signs in a child under 5 that need immediate referral?",
+                          )
+                        }
+                      >
+                        <span className="quick-action-icon">👶</span>
+                        <h3>Child Danger Signs</h3>
+                        <p>
+                          Referral criteria for infants and kids under 5 years
+                          old.
+                        </p>
+                      </div>
+                      <div
+                        className="quick-action-card"
+                        onClick={() =>
+                          handleQuickAction(
+                            "What should I check during a home visit for a pregnant woman in third trimester?",
+                          )
+                        }
+                      >
+                        <span className="quick-action-icon">🤰</span>
+                        <h3>Maternal Care Visit</h3>
+                        <p>
+                          Antenatal & postnatal protocols for third-trimester
+                          checks.
+                        </p>
+                      </div>
+                      <div
+                        className="quick-action-card"
+                        onClick={() =>
+                          handleQuickAction(
+                            "Who is eligible for Janani Suraksha Yojana and what documents are needed?",
+                          )
+                        }
+                      >
+                        <span className="quick-action-icon">📋</span>
+                        <h3>JSY Eligibility Rules</h3>
+                        <p>
+                          Janani Suraksha Yojana benefits and required
+                          paperwork.
+                        </p>
+                      </div>
+                      <div
+                        className="quick-action-card"
+                        onClick={() =>
+                          handleQuickAction(
+                            "What is the protocol for treating anaemia in pregnant women?",
+                          )
+                        }
+                      >
+                        <span className="quick-action-icon">💊</span>
+                        <h3>Anaemia Treatment Protocol</h3>
+                        <p>Standard medicine dosages and monitoring rules.</p>
                       </div>
                     </div>
                   </div>
-                );
-              })}
+                </div>
+              ) : (
+                /* Chat Feed */
+                <div className="messages-list">
+                  {messages.map((m) => {
+                    const isUser = m.role === "user";
+                    const badgeInfo = isUser
+                      ? null
+                      : badgeMap[m.query_type] || badgeMap.general_health;
 
-              {/* Bot typing state loader */}
-              {loading && (
-                <div className="message-wrapper assistant">
-                  <div className="message-bubble assistant general" style={{ padding: '14px 20px' }}>
-                    <div className="message-header" style={{ marginBottom: 4, border: 'none', padding: 0 }}>
-                      <span className="category-badge general">
-                        <Activity className="w-3.5 h-3.5 animate-spin" />
-                        Analyzing...
-                      </span>
+                    return (
+                      <div
+                        key={m.id}
+                        className={`message-wrapper ${isUser ? "user" : "assistant"}`}
+                      >
+                        {isUser ? (
+                          <div className="message-bubble user">
+                            <div className="message-body">
+                              {m.image_path === "uploaded" ? (
+                                <div className="message-image-placeholder text-sm text-gray-500 italic bg-gray-50 border border-gray-100 rounded px-3 py-2 flex items-center gap-2 mb-2">
+                                  <span>📎</span> Image was shared in this
+                                  message (not stored)
+                                </div>
+                              ) : m.image_path ? (
+                                <div className="message-image-container">
+                                  <img
+                                    src={
+                                      m.image_path.startsWith("blob:") ||
+                                      m.image_path.startsWith("data:")
+                                        ? m.image_path
+                                        : `${API_BASE.replace("/api", "")}/${m.image_path}`
+                                    }
+                                    alt="Uploaded medical doc"
+                                    className="message-image"
+                                    onClick={() =>
+                                      window.open(
+                                        m.image_path.startsWith("blob:") ||
+                                          m.image_path.startsWith("data:")
+                                          ? m.image_path
+                                          : `${API_BASE.replace("/api", "")}/${m.image_path}`,
+                                        "_blank",
+                                      )
+                                    }
+                                  />
+                                </div>
+                              ) : null}
+                              {m.content.split("\n").map((line, i) => (
+                                <span key={i}>
+                                  {line}
+                                  <br />
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="assistant-message-container">
+                            <div
+                              className={`message-bubble assistant ${badgeInfo?.className || "general"}`}
+                            >
+                              <div className="message-header">
+                                <span
+                                  className={`category-badge ${badgeInfo?.className || "general"}`}
+                                >
+                                  {badgeInfo?.icon}
+                                  {badgeInfo?.label}
+                                </span>
+                                <span className="message-lang">
+                                  {m.language || "English"}
+                                </span>
+                                <button
+                                  className="message-copy-btn"
+                                  onClick={() =>
+                                    copyToClipboard(m.content, m.id)
+                                  }
+                                  title="Copy Response"
+                                >
+                                  {copiedMessageId === m.id ? (
+                                    <Check className="w-3.5 h-3.5 text-green-600" />
+                                  ) : (
+                                    <Copy className="w-3.5 h-3.5" />
+                                  )}
+                                </button>
+                              </div>
+
+                              <div className="message-body">
+                                {m.image_path === "uploaded" ? (
+                                  <div className="message-image-placeholder text-sm text-gray-500 italic bg-gray-50 border border-gray-100 rounded px-3 py-2 flex items-center gap-2 mb-2">
+                                    <span>📎</span> Image was shared in this
+                                    message (not stored)
+                                  </div>
+                                ) : m.image_path ? (
+                                  <div className="message-image-container">
+                                    <img
+                                      src={
+                                        m.image_path.startsWith("blob:") ||
+                                        m.image_path.startsWith("data:")
+                                          ? m.image_path
+                                          : `${API_BASE.replace("/api", "")}/${m.image_path}`
+                                      }
+                                      alt="Uploaded medical doc"
+                                      className="message-image"
+                                      onClick={() =>
+                                        window.open(
+                                          m.image_path.startsWith("blob:") ||
+                                            m.image_path.startsWith("data:")
+                                            ? m.image_path
+                                            : `${API_BASE.replace("/api", "")}/${m.image_path}`,
+                                          "_blank",
+                                        )
+                                      }
+                                    />
+                                  </div>
+                                ) : null}
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                  {m.content}
+                                </ReactMarkdown>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {/* Bot typing state loader */}
+                  {loading && (
+                    <div className="message-wrapper assistant">
+                      <div
+                        className="message-bubble assistant general"
+                        style={{ padding: "14px 20px" }}
+                      >
+                        <div
+                          className="message-header"
+                          style={{
+                            marginBottom: 4,
+                            border: "none",
+                            padding: 0,
+                          }}
+                        >
+                          <span className="category-badge general">
+                            <Activity className="w-3.5 h-3.5 animate-spin" />
+                            Analyzing...
+                          </span>
+                        </div>
+                        <div className="typing-indicator">
+                          <div className="typing-dot" />
+                          <div className="typing-dot" />
+                          <div className="typing-dot" />
+                        </div>
+                      </div>
                     </div>
-                    <div className="typing-indicator">
-                      <div className="typing-dot" />
-                      <div className="typing-dot" />
-                      <div className="typing-dot" />
-                    </div>
-                  </div>
+                  )}
+
+                  <div ref={messagesEndRef} />
                 </div>
               )}
+            </section>
 
-              <div ref={messagesEndRef} />
-            </div>
-          )}
-        </section>
-
-        {/* Input Panel */}
-        <footer className="input-panel">
-          <div className="input-container-inner">
-            {selectedFile && (
-              <div className="file-preview-container">
-                <div className="file-preview-bubble">
-                  <img src={URL.createObjectURL(selectedFile)} alt="Preview" className="file-preview-image" />
-                  <span className="file-preview-name">{selectedFile.name}</span>
-                  <button type="button" className="file-preview-remove" onClick={() => setSelectedFile(null)} title="Remove Image">
-                    <X className="w-3.5 h-3.5" />
+            {/* Input Panel */}
+            <footer className="input-panel">
+              <div className="input-container-inner">
+                {selectedFile && (
+                  <div className="file-preview-container">
+                    <div className="file-preview-bubble">
+                      <img
+                        src={URL.createObjectURL(selectedFile)}
+                        alt="Preview"
+                        className="file-preview-image"
+                      />
+                      <span className="file-preview-name">
+                        {selectedFile.name}
+                      </span>
+                      <button
+                        type="button"
+                        className="file-preview-remove"
+                        onClick={() => setSelectedFile(null)}
+                        title="Remove Image"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+                <form onSubmit={handleSendMessage} className="input-form">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    ref={fileInputRef}
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files[0]) {
+                        setSelectedFile(e.target.files[0]);
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="chat-attach-btn"
+                    onClick={() => fileInputRef.current?.click()}
+                    title="Attach Medical Document Image"
+                    disabled={loading}
+                  >
+                    <Paperclip className="w-4 h-4" />
                   </button>
+                  <textarea
+                    ref={textareaRef}
+                    className="chat-textarea"
+                    rows="1"
+                    placeholder="Ask about patient guidelines or upload medical docs/prescriptions..."
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendMessage();
+                      }
+                    }}
+                  />
+                  <button
+                    type="submit"
+                    className="chat-send-btn"
+                    disabled={(!input.trim() && !selectedFile) || loading}
+                    title="Send Message"
+                  >
+                    <Send className="w-4 h-4" />
+                  </button>
+                </form>
+
+                <div className="app-disclaimer">
+                  <span
+                    className="text-amber-500 flex-shrink-0"
+                    style={{ fontSize: 16 }}
+                  >
+                    ⚠️
+                  </span>
+                  <div>
+                    <strong>ASHA Worker decision support.</strong> All data is
+                    based on official National Health Mission (NHM) documents.
+                    It does not replace clinical assessment by an ANM or Doctor.
+                    In case of medical emergencies, immediately call{" "}
+                    <strong>104</strong> or transfer to the nearest health
+                    facility.
+                  </div>
                 </div>
               </div>
-            )}
-            <form onSubmit={handleSendMessage} className="input-form">
-              <input
-                type="file"
-                accept="image/*"
-                ref={fileInputRef}
-                style={{ display: 'none' }}
-                onChange={(e) => {
-                  if (e.target.files && e.target.files[0]) {
-                    setSelectedFile(e.target.files[0]);
-                  }
-                }}
-              />
-              <button
-                type="button"
-                className="chat-attach-btn"
-                onClick={() => fileInputRef.current?.click()}
-                title="Attach Medical Document Image"
-                disabled={loading}
-              >
-                <Paperclip className="w-4 h-4" />
-              </button>
-              <textarea
-                ref={textareaRef}
-                className="chat-textarea"
-                rows="1"
-                placeholder="Ask about patient guidelines or upload medical docs/prescriptions..."
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSendMessage();
-                  }
-                }}
-              />
-              <button
-                type="submit"
-                className="chat-send-btn"
-                disabled={(!input.trim() && !selectedFile) || loading}
-                title="Send Message"
-              >
-                <Send className="w-4 h-4" />
-              </button>
-            </form>
-
-            <div className="app-disclaimer">
-              <span className="text-amber-500 flex-shrink-0" style={{ fontSize: 16 }}>⚠️</span>
-              <div>
-                <strong>ASHA Worker decision support.</strong> All data is based on official National Health Mission (NHM) documents. It does not replace clinical assessment by an ANM or Doctor. In case of medical emergencies, immediately call <strong>104</strong> or transfer to the nearest health facility.
-              </div>
-            </div>
-          </div>
-        </footer>
+            </footer>
           </>
         )}
       </main>
